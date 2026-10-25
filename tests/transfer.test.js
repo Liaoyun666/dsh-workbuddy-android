@@ -3,7 +3,7 @@ import { beforeEach, describe, it } from 'node:test';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   DESKTOP_AUTH_RELATIVE,
   desktopAuthCandidates,
@@ -37,16 +37,29 @@ function plaintextDesktop(overrides = {}) {
   };
 }
 
-/** Write a desktop auth file under a fake LocalAppData. */
+/**
+ * Write a desktop auth file at the exact path the Windows candidate list
+ * computes.
+ *
+ * The path is taken from `desktopAuthCandidates` rather than assembled here:
+ * on a POSIX host `join()` would put forward slashes where a real Windows
+ * `LOCALAPPDATA` has backslashes, and the file would land somewhere the
+ * function never looks. (Backslash is a legal filename character on Linux, so
+ * writing to the computed path works there too.)
+ */
 async function seedDesktop(document) {
-  const dir = join(home, 'AppData', 'Local', ...DESKTOP_AUTH_RELATIVE.slice(0, -1));
-  await mkdir(dir, { recursive: true });
-  const path = join(dir, DESKTOP_AUTH_RELATIVE[DESKTOP_AUTH_RELATIVE.length - 1]);
+  const path = desktopAuthCandidates({ platform: 'win32', env: windowsEnv() })[0];
+  await mkdir(dirname(path), { recursive: true });
   await writeFile(path, JSON.stringify(document));
   return path;
 }
 
-const windowsEnv = () => ({ LOCALAPPDATA: join(home, 'AppData', 'Local'), HOME: home });
+/** A Windows-shaped environment: `LOCALAPPDATA` really does use backslashes. */
+const windowsEnv = () => ({
+  LOCALAPPDATA: `${home}\\AppData\\Local`,
+  APPDATA: `${home}\\AppData\\Roaming`,
+  HOME: home,
+});
 
 describe('desktopAuthCandidates', () => {
   it('looks in both AppData roots on Windows', () => {
