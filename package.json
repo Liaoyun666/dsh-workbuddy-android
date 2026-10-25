@@ -1,0 +1,86 @@
+{
+  "name": "dsh-workbuddy-android",
+  "version": "1.0.0",
+  "private": true,
+  "description": "把 WorkBuddy 的登录态从电脑搬到手机，让 DSHA 里的 dsh-workbuddy-bridge 能用起来",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./token": "./lib/token.js",
+    "./credential": "./lib/credential.js",
+    "./atrest": "./lib/atrest.js",
+    "./store": "./lib/store.js",
+    "./status": "./lib/status.js",
+    "./transfer": "./lib/transfer.js",
+    "./api": "./lib/api.js",
+    "./tools": "./lib/tools.js"
+  },
+  "bin": {
+    "workbuddy-android": "tools/cli.js"
+  },
+  "files": [
+    "lib",
+    "tools",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "check": "node tools/check-manifest.js",
+    "export": "node tools/cli.js export",
+    "status": "node tools/cli.js status"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "dsha",
+    "android",
+    "workbuddy",
+    "credential"
+  ],
+  "license": "MIT",
+  "dependencies": {},
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "dshhub": {
+      "schemaVersion": 1,
+      "displayName": "WorkBuddy 登录态搬运",
+      "summary": "在电脑上导出 WorkBuddy 凭据，在手机上导入，让 DSHA 里的 workbuddy 真正可用",
+      "categories": [
+        "integration",
+        "android"
+      ],
+      "surfaces": [
+        "tool",
+        "cli"
+      ],
+      "capabilities": {
+        "provides": [
+          "workbuddy_status",
+          "workbuddy_probe",
+          "workbuddy_import",
+          "workbuddy_refresh"
+        ],
+        "reads": [
+          "$DSH_HOME/.workbuddy-auth.json"
+        ],
+        "network": [
+          "https://copilot.tencent.com",
+          "https://www.codebuddy.cn",
+          "https://www.workbuddy.ai"
+        ]
+      },
+      "compatibility": {
+        "dsh": ">=0.1.5-rc.1",
+        "node": ">=20"
+      }
+    }
+  }
+}

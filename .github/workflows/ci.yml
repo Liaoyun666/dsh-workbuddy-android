@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22', '24']
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@0a44ba7841725637a19e28fa30b79a866c81b0a6 # v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Run tests (no install needed — zero dependencies)
+        run: node --test tests/*.test.js
+
+      - name: Verify plugin manifest contract
+        run: node tools/check-manifest.js
+
+      # The whole point of the plugin is a round trip between two machines.
+      # CI proves it end to end with no credential and no network: export from
+      # a fake desktop file, import on the "phone" side, read the state back.
+      - name: Round trip export → import → status in one shell
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          export DSH_HOME="$work/dsh"
+          export NO_COLOR=1
+          mkdir -p "$work/desktop"
+          cat > "$work/desktop/workbuddy-desktop.info" <<'JSON'
+          {
+            "auth": {
+              "accessToken": "ci-access-token",
+              "refreshToken": "ci-refresh-token",
+              "domain": "www.workbuddy.cn",
+              "expiresAt": 4102444800
+            },
+            "account": { "uid": "ci-uid", "nickname": "CI" }
+          }
+          JSON
+
+          token="$(node tools/cli.js export --file "$work/desktop/workbuddy-desktop.info" 2>"$work/export.err")"
+          case "$token" in
+            wb1.*) echo "export produced a token (${#token} chars)" ;;
+            *) echo "export did not produce a token: $token"; exit 1 ;;
+          esac
+          grep -q '导出成功' "$work/export.err"
+
+          node tools/cli.js import --token "$token"
+          node tools/cli.js status --json > "$work/status.json"
+          node -e '
+            const s = require("node:fs").readFileSync(process.argv[1], "utf8");
+            const j = JSON.parse(s);
+            if (j.state !== "ready") { console.error("expected ready, got " + j.state); process.exit(1); }
+            if (j.credential.nickname !== "CI") { console.error("nickname lost"); process.exit(1); }
+            if (/ci-access-token|ci-refresh-token/.test(s)) { console.error("status leaked a token"); process.exit(1); }
+            console.log("status: ready, identity preserved, no token leak");
+          ' "$work/status.json"
+
+          node tools/cli.js forget --yes
+          rm -rf "$work"
