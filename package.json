@@ -1,8 +1,8 @@
 {
   "name": "dsh-workbuddy-android",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
-  "description": "把 WorkBuddy 的登录态从电脑搬到手机，让 DSHA 里的 dsh-workbuddy-bridge 能用起来",
+  "description": "把 WorkBuddy 的登录态搬进 DSHA：在手机上直接从 App 抓取，或在电脑上导出再导入",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
