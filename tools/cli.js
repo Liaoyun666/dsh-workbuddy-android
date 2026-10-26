@@ -20,12 +20,14 @@ import { exportCredential, importCredential } from '../lib/transfer.js';
 import { forgetCredential } from '../lib/tools.js';
 import { listModels, probeChat, refreshCredential } from '../lib/api.js';
 import { resolveAuthPath, writeAuthFile } from '../lib/store.js';
+import { captureFromPhone } from '../lib/phone.js';
 
 const PROG = 'workbuddy-android';
 
-const HELP = `${PROG} — 把 WorkBuddy 登录态从电脑搬到手机
+const HELP = `${PROG} — 把 WorkBuddy 登录态搬到 DSHA
 
 用法：
+  ${PROG} capture [--dry-run] [--keep-copy] [--json]
   ${PROG} export [--out <文件>] [--file <桌面凭据>] [--electron <程序>] [--json]
   ${PROG} import --token <令牌> | --file <文件> | --stdin [--auth-file <路径>]
   ${PROG} status [--json] [--auth-file <路径>]
@@ -33,11 +35,18 @@ const HELP = `${PROG} — 把 WorkBuddy 登录态从电脑搬到手机
   ${PROG} refresh [--json]
   ${PROG} forget [--yes]
 
-export 在**安装了 WorkBuddy 桌面版并已登录的电脑**上跑，产出一行 wb1. 开头的
-令牌；import 在手机（DSHA 容器里）跑，把它写进 /root/.dsh/.workbuddy-auth.json，
-dsh-workbuddy-bridge 读的就是这个文件。
+两条路，看你在哪台机器上登录过：
+
+  capture  在手机上跑。直接读 WorkBuddy App 自己的 MMKV 存储，把 token 抓出来。
+           需要 DSHA 的设备 shell 可用（root 或 Shizuku 已授权）。
+  export   在**装了 WorkBuddy 桌面版并已登录的电脑**上跑，产出一行 wb1. 开头的
+           令牌；import 在手机上把它写进 /root/.dsh/.workbuddy-auth.json。
+
+两条路最终都写同一个文件，dsh-workbuddy-bridge 读的就是它。
 
 选项：
+  --dry-run          capture 时不写文件，只报告抓到了什么
+  --keep-copy        capture 时保留 Download/DSHA 里的临时副本
   --out <文件>       导出时同时写到文件（导出默认只打 stdout）
   --file <路径>      export：指定桌面凭据文件；import：从文件读令牌或 JSON
   --electron <程序>  指定 WorkBuddy 可执行文件（缺省按平台猜）
@@ -52,7 +61,16 @@ dsh-workbuddy-bridge 读的就是这个文件。
 退出码：0 成功 / 1 失败 / 2 用法错误`;
 
 const VALUE_FLAGS = new Set(['out', 'file', 'electron', 'auth-file', 'token', 'model']);
-const BOOL_FLAGS = new Set(['json', 'stdin', 'yes', 'chat', 'help', 'no-color']);
+const BOOL_FLAGS = new Set([
+  'json',
+  'stdin',
+  'yes',
+  'chat',
+  'help',
+  'no-color',
+  'dry-run',
+  'keep-copy',
+]);
 
 /** A usage error, exit 2. */
 class UsageError extends Error {}
@@ -117,6 +135,80 @@ async function readStdin(stream) {
   const chunks = [];
   for await (const chunk of stream) chunks.push(chunk);
   return Buffer.concat(chunks).toString('utf8');
+}
+
+/**
+ * `capture`
+ * @param {Record<string, string | true>} flags
+ */
+async function commandCapture(flags) {
+  /** @type {string[]} */
+  const staged = [];
+  const result = await captureFromPhone({
+    claim: (paths) => staged.push(...paths),
+  });
+  const summary = describeCredential(result.credential);
+
+  /** @type {Record<string, unknown>} */
+  const report = {
+    ok: true,
+    packageName: result.packageName,
+    directory: result.directory,
+    files: result.files,
+    keyCount: result.keys.length,
+    credential: summary,
+  };
+
+  if (flags['dry-run'] !== true) {
+    const { normalizeCredential } = await import('../lib/credential.js');
+    const normalized = normalizeCredential(result.credential);
+    if (!normalized.usable) {
+      report.ok = false;
+      report.code = 'UNUSABLE';
+      if (flags.json !== true) {
+        process.stderr.write(
+          `抓到了凭据，但它已经不能用了（access 与 refresh 都过期）。\n打开手机上的 WorkBuddy 重新登录一次，再抓一遍。\n`,
+        );
+      } else {
+        process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+      }
+      return 1;
+    }
+    const written = await writeAuthFile(resolveAuthPath(), normalized.credential);
+    report.path = written.path;
+    report.bytes = written.bytes;
+    report.replaced = written.replaced;
+  }
+
+  if (flags['keep-copy'] !== true) {
+    const { unlink } = await import('node:fs/promises');
+    for (const path of staged) await unlink(path).catch(() => {});
+  }
+
+  if (flags.json === true) {
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    return 0;
+  }
+
+  const { ok: green, dim, bold, warn } = painter(useColor(flags));
+  const lines = [
+    green(`${bold('抓到凭据')}（${result.packageName}）`),
+    `来源：${result.directory}`,
+    ...result.files.map(
+      (file) => dim(`  ${file.file} — ${file.entries} 条记录（${file.layout}${file.complete ? '' : '，尾部有残留'}）`),
+    ),
+    `身份：${summary.nickname ?? summary.uid ?? '未知'}`,
+    summary.expiresAt !== undefined ? `access token 到期：${summary.expiresAt}` : '',
+    summary.refreshExpiresAt !== undefined ? `refresh token 到期：${summary.refreshExpiresAt}` : '',
+    report.path !== undefined
+      ? green(`已写入 ${report.path}（${report.bytes} 字节${report.replaced ? '，覆盖了原有文件' : ''}）`)
+      : warn('--dry-run：没有写文件'),
+    '',
+    dim(staged.length > 0 && flags['keep-copy'] === true ? `临时副本保留在：${staged.join('、')}` : ''),
+    report.path !== undefined ? dim(`确认状态：${PROG} status`) : '',
+  ].filter((line) => line !== '');
+  process.stdout.write(`${lines.join('\n')}\n`);
+  return 0;
 }
 
 /**
@@ -361,6 +453,8 @@ export async function main(argv) {
 
   try {
     switch (command) {
+      case 'capture':
+        return await commandCapture(flags);
       case 'export':
         return await commandExport(flags);
       case 'import':

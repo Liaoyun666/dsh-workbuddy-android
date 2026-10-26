@@ -48,9 +48,15 @@ function byName(list) {
 }
 
 describe('tool set', () => {
-  it('registers exactly four tools with the names the manifest promises', () => {
+  it('registers exactly five tools with the names the manifest promises', () => {
     const names = tools().map((tool) => tool.name).sort();
-    assert.deepEqual(names, ['workbuddy_import', 'workbuddy_probe', 'workbuddy_refresh', 'workbuddy_status']);
+    assert.deepEqual(names, [
+      'workbuddy_capture_from_phone',
+      'workbuddy_import',
+      'workbuddy_probe',
+      'workbuddy_refresh',
+      'workbuddy_status',
+    ]);
   });
 
   it('gives every tool a description and a JSON schema', () => {

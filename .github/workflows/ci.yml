@@ -74,3 +74,83 @@ jobs:
 
           node tools/cli.js forget --yes
           rm -rf "$work"
+
+      # Path one: read the token out of the phone's own MMKV file. A real device
+      # is not available here, so the bytes are constructed exactly the way MMKV
+      # lays them out and pushed through the real parser and the real extractor.
+      - name: Parse a phone MMKV file end to end
+        run: |
+          set -euo pipefail
+          node --input-type=module -e '
+            import { writeFile } from "node:fs/promises";
+            import { tmpdir } from "node:os";
+            import { join } from "node:path";
+            import { parseMmkv } from "./lib/mmkv.js";
+            import { credentialFromEntries } from "./lib/phone.js";
+
+            // Backslash escapes are not available inside this single-quoted
+            // shell literal, so every byte is built with Buffer.from.
+            const varint = (n) => {
+              const out = [];
+              let rest = n;
+              do {
+                let byte = rest % 128;
+                rest = Math.floor(rest / 128);
+                if (rest > 0) byte |= 0x80;
+                out.push(byte);
+              } while (rest > 0);
+              return Buffer.from(out);
+            };
+            const entry = (key, value) => {
+              const k = Buffer.from(key, "utf8");
+              return Buffer.concat([varint(k.length), k, varint(value.length), value]);
+            };
+            const expires = Buffer.alloc(8);
+            expires.writeBigInt64LE(BigInt(Date.now() + 86400000), 0);
+            const body = Buffer.concat([
+              varint(0),                                    // placeholder item size
+              entry("workbuddy_token", Buffer.from("ci-phone-access", "utf8")),
+              entry("workbuddy_refresh_token", Buffer.from("ci-phone-refresh", "utf8")),
+              entry("workbuddy_token_expire_at", expires),
+              // The real app key is `workbuddy_user` holding a JSON blob; the
+              // uid has to be extracted from it.
+              entry("workbuddy_user", Buffer.from(JSON.stringify({ uid: "ci-phone-uid", nickname: "CI" }), "utf8")),
+            ]);
+            const header = Buffer.alloc(4);
+            header.writeUInt32LE(body.length, 0);
+
+            const path = join(tmpdir(), "ci-mmkv.default");
+            await writeFile(path, Buffer.concat([header, body]));
+
+            const parsed = parseMmkv(await (await import("node:fs/promises")).readFile(path));
+            if (!parsed.complete) { console.error("parse did not complete"); process.exit(1); }
+            const credential = credentialFromEntries(parsed.entries);
+            if (credential.accessToken !== "ci-phone-access") { console.error("wrong access token"); process.exit(1); }
+            if (credential.refreshToken !== "ci-phone-refresh") { console.error("wrong refresh token"); process.exit(1); }
+            if (credential.uid !== "ci-phone-uid") { console.error("uid not extracted from the user blob"); process.exit(1); }
+            if (!(credential.expiresAtMs > Date.now())) { console.error("expiry not read as a future time"); process.exit(1); }
+            console.log("mmkv: " + parsed.layout + " layout, " + parsed.entries.size + " keys, token extracted");
+          '
+
+      # On a machine with no DSHA device shell, capture must say so politely
+      # instead of throwing or pretending it worked.
+      - name: Capture reports a missing device shell instead of crashing
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          export DSH_HOME="$work/dsh"
+          export NO_COLOR=1
+          set +e
+          node tools/cli.js capture --dry-run > "$work/out" 2> "$work/err"
+          code=$?
+          set -e
+          if [ "$code" -ne 1 ]; then
+            echo "expected exit 1 without a device shell, got $code"
+            cat "$work/out" "$work/err"
+            exit 1
+          fi
+          if grep -qiE 'at .*\.js:|TypeError|ReferenceError' "$work/err"; then
+            echo "capture leaked a stack trace:"; cat "$work/err"; exit 1
+          fi
+          echo "capture failed cleanly without a device shell"
+          rm -rf "$work"

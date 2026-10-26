@@ -4,15 +4,25 @@
 
 手机上没有 WorkBuddy 桌面版，也没有那把解密凭据的本地密钥，所以 `dsh-workbuddy-bridge` 在安卓上永远是「未登录」——而它的登录按钮点了也没用，因为那个按钮指向的是桌面 App 的能力。
 
-这个插件补的就是这一环：在**有桌面版的电脑**上把已有登录态解出来，打成一行可粘贴的文本，带到手机上写进桥接插件要读的那个文件。
+这个插件补的就是这一环，**两条路都通**：
 
 ```
-电脑                                    手机（DSHA 容器）
-workbuddy-android export  ──wb1.…──→  workbuddy-android import
-        ↓                                     ↓
-  读桌面凭据 + 解密                    写 /root/.dsh/.workbuddy-auth.json
-                                              ↓
-                                    dsh-workbuddy-bridge 直接可用
+路一（推荐）手机已经装了 WorkBuddy App
+  手机（DSHA 容器）
+  workbuddy_capture_from_phone
+        ↓ 读 WorkBuddy App 自己的 MMKV 存储（纯 JS 解析）
+  写 /root/.dsh/.workbuddy-auth.json
+        ↓
+  dsh-workbuddy-bridge 直接可用
+
+
+路二 只有电脑上登录过 WorkBuddy 桌面版
+  电脑                                    手机（DSHA 容器）
+  workbuddy-android export  ──wb1.…──→  workbuddy-android import
+          ↓                                     ↓
+    读桌面凭据 + 解密                    写 /root/.dsh/.workbuddy-auth.json
+                                                ↓
+                                      dsh-workbuddy-bridge 直接可用
 ```
 
 ---
@@ -22,7 +32,7 @@ workbuddy-android export  ──wb1.…──→  workbuddy-android import
 说清楚边界，比说清楚功能更省事：
 
 - **不做登录。** 设备码登录是另一条路，本插件只搬运已有的登录态。
-- **不在手机上解密。** 解密只在桌面端发生一次；手机端收到的已经是明文，落盘权限 0600。
+- **不在手机上解桌面凭据。** 桌面那套 `$wbEncrypted` 信封只在电脑上解；手机端读的是 App 自己写的 MMKV 明文。
 - **不替代 `dsh-workbuddy-bridge`。** 它仍然是唯一的 provider，本插件只负责把它要读的文件喂进去。
 - **不联网拉额度、不改模型目录。** 它只碰凭据文件，和一次可选的连通性验证。
 
@@ -41,7 +51,27 @@ dsha-plugin install Liaoyun666/dsh-workbuddy-android
 
 ## 用
 
-### 一、在电脑上导出
+### 路一：手机上抓（不用电脑）
+
+手机上装过 WorkBuddy App 并登录过，就这样：
+
+```bash
+node tools/cli.js capture
+```
+
+它做四件事：用 DSHA 设备 shell `ls` 出 WorkBuddy 的 MMKV 目录、把最新的三个文件 `cp` 到 `Download/DSHA/`、用纯 JS 解出 token、写进 `$DSH_HOME/.workbuddy-auth.json`。跑完顺手把临时副本删掉 —— 共享存储里躺着一份活 token 是隐患。
+
+> **需要 root 或 Shizuku 已授权。** 走的是 DSHA 自己的设备 shell（`/root/dsh-bin/adb-shell`），它优先用 root/Shizuku 直接执行，没有才回落到 ADB。没授权时返回 `POLICY_BLOCKED`，去「设备能力」页打开对应开关 —— 这个错误**重试无效**，必须先去授权。
+>
+> 参数：`--dry-run` 只看抓到了什么不写文件，`--keep-copy` 保留临时副本（排查用，用完记得自己删）。
+
+也可以在会话里让模型调 `workbuddy_capture_from_phone` 工具，效果一样。
+
+### 路二：从电脑搬
+
+手机上没有 WorkBuddy App，或者 App 里的登录态也过期了，就走这条。
+
+#### 一、在电脑上导出
 
 电脑上装好 WorkBuddy 桌面版并已登录，然后：
 
@@ -65,7 +95,7 @@ node tools/cli.js export --out token.txt     # 同上，顺手设成 0600
 
 自己想办法：复制粘贴、发给自己、扫码都行。**令牌等于登录态**，别贴到公开地方。
 
-### 三、在手机上导入
+#### 三、在手机上导入
 
 ```bash
 node tools/cli.js import --token 'wb1.……'
@@ -91,6 +121,31 @@ node tools/cli.js verify --chat   # 真的发一句话（会消耗一点额度�
 
 ---
 
+## 手机上那张 MMKV 文件长什么样
+
+路一之所以能不解密就读出 token，是因为 MMKV 的格式本身很简单 —— 它是个长度前缀的 map：
+
+```
+偏移 0      uint32 LE   后面数据区的字节数
+偏移 4      varint      一个占位的假条目大小（每次全量写回都会写入，必须按 varint 跳过，不能当 4 字节）
+之后重复    varint keyLen, key, varint valueLen, value
+```
+
+`valueLen == 0` 表示这个键被删了（MMKV 靠追加写来删除，不重写整个文件）。**MMKV 不记录类型**：int 是小端字节、字符串是裸 UTF-8、bool 是一字节，只能按长度猜。本插件因此对「全是可打印 ASCII 且长度 2–512」的值优先当字符串读 —— 猜错一个数字无所谓，猜错一个 token 就白干了。
+
+解析器还会同时尝试「跳过占位」和「不跳过占位」两种布局，取条目多的那个：新版全量写回有占位，新建或旧版文件可能没有。
+
+`lib/mmkv.js` 是手写的，不是 `mmkv` 包。理由还是那条：安卓容器装不上原生模块。
+
+### 键名是从 APK 里读出来的，不是猜的
+
+`lib/phone.js` 的 `TOKEN_KEYS` 每一条都对着 `lib/arm64-v8a/libapp.so` 里的字符串池核实过。两点值得说明：
+
+- **真实键名是 `workbuddy_user`，不是 `workbuddy_uid`。** 后者在二进制里出现 0 次（自然得让人想当然，所以特别写在这里）。而且它存的是**一整个 JSON 账号对象**，不是裸 id —— `uidFrom` 会把它打开，认 `uid` / `userId` / `openId` / `id` 等几个名字，最多往下钻三层。抽不出来就当没有 uid，不影响 token 本身。
+- 同一套数据有两份键：`workbuddy_*` 和 `codebuddy_*`（后者是沿用 CodeBuddy 的家底）。两套都认，先 `workbuddy_*`。
+
+---
+
 ## 五种状态，五种下一步
 
 `status` 不会把一切塞进「能不能用」两个值里，因为每种状态要用户做的事完全不同：
@@ -107,13 +162,14 @@ node tools/cli.js verify --chat   # 真的发一句话（会消耗一点额度�
 
 ---
 
-## 给模型用的四个工具
+## 给模型用的五个工具
 
 装上之后，agent 能自己回答「workbuddy 为什么没反应」：
 
 | 工具 | 碰什么 | 什么时候该用 |
 |---|---|---|
 | `workbuddy_status` | 只读本地文件 | 用户说「workbuddy 能不能用」「怎么没反应」 |
+| `workbuddy_capture_from_phone` | 设备 shell + 写本地文件 | 手机上登录过 WorkBuddy App、但桥接插件说没登录 |
 | `workbuddy_probe` | 只读网络 | 状态显示已登录但用户说用不了 |
 | `workbuddy_import` | 只写文件 | 用户手上有一串 `wb1.` 令牌 |
 | `workbuddy_refresh` | 网络 + 写文件 | **基本不该用** —— 见下 |
@@ -124,21 +180,24 @@ node tools/cli.js verify --chat   # 真的发一句话（会消耗一点额度�
 
 ---
 
-## 踩出来的五条硬规矩
+## 踩出来的七条硬规矩
 
-这几条不是设计口味，是踩出来的（前三条来自 `dsh-workbuddy-bridge`，后两条是本插件自己踩的）：
+这几条不是设计口味，是踩出来的（前三、五条来自 `dsh-workbuddy-bridge`，其余是本插件自己踩的）：
 
 1. **own 格式一字不差。** `{version:1, credential:{…}}`，`accessToken` 必须是非空字符串，缺省字段填 `''`/`0`。桥接插件 `parseOwnDocument` 读回时还会强制 `source:'dsh'`。
 2. **刷新响应不带 `domain`。** 谁忘了沿用原凭据的 `domain`，谁就会把 CN 账号指向 global 域名，然后收到一堆 401。
 3. **聊天必须 `stream: true`。** 非流式请求上游直接回 `400 / 11101 Non-stream chat request is currently not supported`。思考在 `delta.reasoning_content`，正文在 `delta.content`。
 4. **`max_tokens` 要够思考先花完。** 实测：`max_tokens: 32` 时 `finish_reason` 是 `length`，思考把额度吃干净，正文永远是空的；`512` 才拿得到那两个字。推理模型的探测请求不能抠额度，否则它会把「这个模型很正常」报成「没回任何内容」。
 5. **桌面密钥是 `sha256(密钥文本)`，不是 `sha256(base64 解码后的字节)`。** 两种算法都能产出好看的 32 字节密钥，只有信封里的 `keyId` 知道谁对（错的会得到 `28ad26a8…`，对的 `9127dea1…`）。这也解释了为什么往返测试抓不到它——加解密共用一套派生，自洽永远是自洽的。
+6. **`valueLen` 为 0 是删除，不是空值。** MMKV 用追加写实现删除：写一条长度为 0 的同名键。把它当「空字符串」读，就会把已删除的旧 token 当成当前值。
+7. **读 token 之前先看设备 shell 的策略白名单。** DSHA 的 `/root/dsh-bin/adb-shell` 不是自由 shell：`READ` 只允许 `cat/head/tail/ls/find/md5sum/…` 那一小撮，脚本、管道、重定向一律拦；`FILE` 的 `cp` 源路径才允许任意（仅拦短信库）。所以取文件的写法是 `cp 私有路径 → Download/DSHA/`，再由插件用 `node:fs` 读回，**而不是** `cat` 一个二进制文件回来 —— `cat` 的 stdout 会被当文本传，二进制会被改。
 
 ---
 
 ## 命令行
 
 ```
+workbuddy-android capture [--dry-run] [--keep-copy] [--json]
 workbuddy-android export [--out <文件>] [--file <桌面凭据>] [--electron <程序>] [--json]
 workbuddy-android import --token <令牌> | --file <文件> | --stdin [--auth-file <路径>]
 workbuddy-android status [--json] [--auth-file <路径>]
@@ -149,6 +208,8 @@ workbuddy-android forget [--yes]
 
 退出码：`0` 成功 / `1` 失败 / `2` 用法错误。
 
+`capture` 和 `export` 是两条不同的路：前者**在手机上跑**，读手机 App 自己的存储；后者**在电脑上跑**，读桌面版的凭据。别在同一台机器上找错方向。
+
 `forget` 必须带 `--yes`：删掉登录态是人的决定，不该被一个走神的回车完成。
 
 ---
@@ -156,11 +217,11 @@ workbuddy-android forget [--yes]
 ## 开发
 
 ```bash
-node --test tests/*.test.js       # 179 个用例
+node --test tests/*.test.js       # 230 个用例
 node tools/check-manifest.js      # 插件包契约自检
 ```
 
-测试不联网、不用真凭据、不需要桌面版。`tools/mock-api.js` 复刻了上游三个真实行为（非流式被拒、刷新不带 domain、思考单独一路），所以 HTTP 那层是真的在跑，不是打桩。
+测试不联网、不用真凭据、不需要桌面版、不需要一台真手机。`tools/mock-api.js` 复刻了上游三个真实行为（非流式被拒、刷新不带 domain、思考单独一路）；`tests/phone.test.js` 用一个 `runner` 假扮设备 shell，再用真实的 MMKV 字节构造器生成文件 —— 所以格式解析和「抓到之后怎么处理」都是真跑，只有「能不能 spawn 一个 shell」是假的。
 
 CI 在 Node 20 / 22 / 24 上跑同一套，外加一条端到端：伪造一份桌面凭据 → `export` → `import` → `status --json` 断言 `state=ready` 且身份没丢、令牌没漏。
 

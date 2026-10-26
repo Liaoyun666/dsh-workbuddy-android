@@ -1,0 +1,32 @@
+# dsh-android-portability 的报告说明
+#
+# 这份文件不是"把警告藏起来"，是逐条给出的判断依据。跑
+#   node ../dsh-android-portability/tools/cli.js .
+# 会看到 1 阻断 + 7 警告，全部来自下面这一条根因。
+#
+# lib/desktop-key.js：桌面端专用，安卓上根本不加载
+#   S1  阻断：'C:\Program Files\WorkBuddy\WorkBuddy.exe'
+#   S4  警告：'WorkBuddy.exe'
+#   S5  警告：process.platform === 'win32' 分支
+#   S9  提示：child_process
+#
+# 判据是 import 图，不是"看起来像"：
+#   lib/index.js    → credential.js, tools.js, status.js      ← 插件入口
+#   lib/tools.js    → status, api, credential, token, mmkv, phone, store
+#   lib/transfer.js → desktop-key.js                          ← 只有它
+#   （lib/index.js 不 import transfer.js，tools.js 也不 import）
+#
+# 也就是说 DSHA 里插件启动时，desktop-key.js 连模块求值都不会发生。
+# 它是 CLI `export` 子命令的依赖，而那个子命令只在装了 WorkBuddy 桌面版的
+# 电脑上跑。把 Windows 路径从这里挪走，唯一结果是"电脑上也找不到程序了"。
+#
+# 保留这些 Windows 分支是刻意的：`export` 存在的意义就是在 Windows/macOS
+# 上把凭据解出来。把它写成"跨平台"，它就不能干活了。
+#
+# 安卓侧真实走的是 lib/phone.js + lib/mmkv.js，那两个文件在扫描里是干净的。
+lib/desktop-key.js
+
+# 测试里起子进程（S9 提示）：测的就是"没有设备 shell 时怎么报错"，
+# 不 spawn 一个进程就测不到这个分支。
+tests/phone.test.js
+tests/cli.test.js

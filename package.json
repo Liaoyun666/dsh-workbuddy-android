@@ -14,7 +14,9 @@
     "./status": "./lib/status.js",
     "./transfer": "./lib/transfer.js",
     "./api": "./lib/api.js",
-    "./tools": "./lib/tools.js"
+    "./tools": "./lib/tools.js",
+    "./mmkv": "./lib/mmkv.js",
+    "./phone": "./lib/phone.js"
   },
   "bin": {
     "workbuddy-android": "tools/cli.js"
@@ -52,7 +54,7 @@
     "dshhub": {
       "schemaVersion": 1,
       "displayName": "WorkBuddy 登录态搬运",
-      "summary": "在电脑上导出 WorkBuddy 凭据，在手机上导入，让 DSHA 里的 workbuddy 真正可用",
+      "summary": "在电脑上导出 WorkBuddy 凭据，在手机上导入或直接从手机 App 抓取，让 DSHA 里的 workbuddy 真正可用",
       "categories": [
         "integration",
         "android"
@@ -66,7 +68,8 @@
           "workbuddy_status",
           "workbuddy_probe",
           "workbuddy_import",
-          "workbuddy_refresh"
+          "workbuddy_refresh",
+          "workbuddy_capture_from_phone"
         ],
         "reads": [
           "$DSH_HOME/.workbuddy-auth.json"
